@@ -51,6 +51,12 @@ namespace config {
     } nv_legacy;
 
     struct {
+      bool enabled = true;
+      int wan_max_kbps = 42000;
+      int min_kbps = 3000;
+    } abr;
+
+    struct {
       std::optional<int> qsv_preset;
       std::optional<int> qsv_cavlc;
       bool qsv_slow_hevc;

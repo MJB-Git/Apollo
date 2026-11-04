@@ -458,6 +458,7 @@ namespace config {
     true,  // nv_opengl_vulkan_on_dxgi
     true,  // nv_sunshine_high_power_mode
     {},  // nv_legacy
+    { true, 42000, 3000 },  // abr
 
     {
       qsv::medium,  // preset
@@ -1124,6 +1125,9 @@ namespace config {
     bool_f(vars, "nvenc_realtime_hags", video.nv_realtime_hags);
     bool_f(vars, "nvenc_opengl_vulkan_on_dxgi", video.nv_opengl_vulkan_on_dxgi);
     bool_f(vars, "nvenc_latency_over_power", video.nv_sunshine_high_power_mode);
+    bool_f(vars, "abr_enabled", video.abr.enabled);
+    int_between_f(vars, "abr_wan_max_kbps", video.abr.wan_max_kbps, {1000, 150000});
+    int_between_f(vars, "abr_min_kbps", video.abr.min_kbps, {500, 50000});
 
 #if !defined(__ANDROID__) && !defined(__APPLE__)
     video.nv_legacy.preset = video.nv.quality_preset + 11;

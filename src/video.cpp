@@ -368,6 +368,13 @@ namespace video {
 
     void invalidate_ref_frames(int64_t first_frame, int64_t last_frame) override {
       BOOST_LOG(error) << "Encoder doesn't support reference frame invalidation";
+    }
+
+    void reconfigure_bitrate(uint32_t bitrate_kbps) override {
+      if (avcodec_ctx) {
+        avcodec_ctx->bit_rate = (int64_t)bitrate_kbps * 1000;
+        avcodec_ctx->rc_max_rate = (int64_t)bitrate_kbps * 1000;
+      }
       request_idr_frame();
     }
 
@@ -411,6 +418,12 @@ namespace video {
 
       if (!device->nvenc->invalidate_ref_frames(first_frame, last_frame)) {
         force_idr = true;
+      }
+    }
+
+    void reconfigure_bitrate(uint32_t bitrate_kbps) override {
+      if (device && device->nvenc) {
+        device->nvenc->reconfigure_bitrate(bitrate_kbps);
       }
     }
 
@@ -1935,6 +1948,7 @@ namespace video {
     auto packets = mail::man->queue<packet_t>(mail::video_packets);
     auto idr_events = mail->event<bool>(mail::idr);
     auto invalidate_ref_frames_events = mail->event<std::pair<int64_t, int64_t>>(mail::invalidate_ref_frames);
+    auto reconfigure_bitrate_events = mail->event<uint32_t>(mail::reconfigure_bitrate);
 
     {
       // Load a dummy image into the AVFrame to ensure we have something to encode
@@ -1980,6 +1994,12 @@ namespace video {
       }
 
       bool requested_idr_frame = false;
+
+      while (reconfigure_bitrate_events->peek()) {
+        if (auto target_kbps = reconfigure_bitrate_events->pop(0ms)) {
+          session->reconfigure_bitrate(*target_kbps);
+        }
+      }
 
       while (invalidate_ref_frames_events->peek()) {
         if (auto frames = invalidate_ref_frames_events->pop(0ms)) {

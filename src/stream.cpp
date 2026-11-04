@@ -20,6 +20,7 @@ extern "C" {
 }
 
 // local includes
+#include "abr_controller.h"
 #include "config.h"
 #include "crypto.h"
 #include "display_device.h"
@@ -374,6 +375,7 @@ namespace stream {
 
       safe::mail_raw_t::event_t<bool> idr_events;
       safe::mail_raw_t::event_t<std::pair<int64_t, int64_t>> invalidate_ref_frames_events;
+      safe::mail_raw_t::event_t<uint32_t> reconfigure_bitrate_events;
 
       std::unique_ptr<platf::deinit_t> qos;
     } video;
@@ -423,6 +425,7 @@ namespace stream {
     safe::signal_t controlEnd;
 
     std::atomic<session::state_e> state;
+    abr::abr_controller_t abr;
   };
 
   /**
@@ -947,6 +950,11 @@ namespace stream {
 
       auto lastGoodFrame = stats[3];
 
+      uint32_t new_bitrate = 0;
+      if (session->abr.on_packet_loss_stats(count, t.count(), new_bitrate)) {
+        session->video.reconfigure_bitrate_events->raise(new_bitrate);
+      }
+
       BOOST_LOG(verbose)
         << "type [IDX_LOSS_STATS]"sv << std::endl
         << "---begin stats---" << std::endl
@@ -1170,6 +1178,13 @@ namespace stream {
           if (!session->control.peer) {
             has_session_awaiting_peer = true;
           } else {
+            if (session->control.peer) {
+              uint32_t new_bitrate = 0;
+              if (session->abr.tick(session->control.peer->roundTripTime, session->control.peer->roundTripTimeVariance, new_bitrate)) {
+                session->video.reconfigure_bitrate_events->raise(new_bitrate);
+              }
+            }
+
             auto &feedback_queue = session->control.feedback_queue;
             while (feedback_queue->peek()) {
               auto feedback_msg = feedback_queue->pop();
@@ -2095,6 +2110,12 @@ namespace stream {
       }
 
       session.control.expected_peer_address = addr_string;
+
+      abr::abr_controller_t::config_t abr_cfg;
+      abr_cfg.enabled = config::video.abr.enabled;
+      abr_cfg.wan_max_kbps = config::video.abr.wan_max_kbps;
+      abr_cfg.min_kbps = config::video.abr.min_kbps;
+      session.abr.init(abr_cfg, session.config.monitor.bitrate, addr_string);
       BOOST_LOG(debug) << "Expecting incoming session connections from "sv << addr_string;
 
       // Insert this session into the session list
@@ -2172,6 +2193,7 @@ namespace stream {
 
       session->video.idr_events = mail->event<bool>(mail::idr);
       session->video.invalidate_ref_frames_events = mail->event<std::pair<int64_t, int64_t>>(mail::invalidate_ref_frames);
+      session->video.reconfigure_bitrate_events = mail->event<uint32_t>(mail::reconfigure_bitrate);
       session->video.lowseq = 0;
       session->video.ping_payload = launch_session.av_ping_payload;
       if (config.encryptionFlagsEnabled & SS_ENC_VIDEO) {

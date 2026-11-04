@@ -69,6 +69,13 @@ namespace nvenc {
      */
     bool invalidate_ref_frames(uint64_t first_frame, uint64_t last_frame);
 
+    /**
+     * @brief Reconfigure bitrate dynamically mid-stream.
+     * @param bitrate_kbps Target bitrate in kilobits per second.
+     * @return `true` on success, `false` on error.
+     */
+    bool reconfigure_bitrate(uint32_t bitrate_kbps);
+
   protected:
     /**
      * @brief Required. Used for loading NvEnc library and setting `nvenc` variable with `NvEncodeAPICreateInstance()`.
@@ -137,7 +144,12 @@ namespace nvenc {
                                                          ///< Should be set in `init_library()`.
     NV_ENC_REGISTERED_PTR registered_input_buffer = nullptr;  ///< Platform-specific input surface registered with `NvEncRegisterResource()`.
                                                               ///< Should be set in `create_and_register_input_buffer()`.
-    void *async_event_handle = nullptr;  ///< (optional) Platform-specific handle of event object event.
+    void *async_event_handle = nullptr;
+    NV_ENC_INITIALIZE_PARAMS active_init_params {};
+    NV_ENC_CONFIG active_enc_config {};
+    uint32_t active_framerate = 60;
+    int active_vbv_percentage_increase = 0;
+    bool supports_custom_vbv_buf_size = false;  ///< (optional) Platform-specific handle of event object event.
                                          ///< Can be set in constructor or `init_library()`, must override `wait_for_async_event()`.
 
   private:

@@ -244,7 +244,8 @@ namespace nvenc {
     enc_config.rcParams.enableAQ = config.adaptive_quantization;
     enc_config.rcParams.averageBitRate = client_config.bitrate * 1000;
 
-    if (get_encoder_cap(NV_ENC_CAPS_SUPPORT_CUSTOM_VBV_BUF_SIZE)) {
+    supports_custom_vbv_buf_size = get_encoder_cap(NV_ENC_CAPS_SUPPORT_CUSTOM_VBV_BUF_SIZE);
+    if (supports_custom_vbv_buf_size) {
       enc_config.rcParams.vbvBufferSize = client_config.bitrate * 1000 / client_config.framerate;
       if (config.vbv_percentage_increase > 0) {
         enc_config.rcParams.vbvBufferSize += enc_config.rcParams.vbvBufferSize * config.vbv_percentage_increase / 100;
@@ -377,6 +378,10 @@ namespace nvenc {
     }
 
     init_params.encodeConfig = &enc_config;
+    active_init_params = init_params;
+    active_enc_config = enc_config;
+    active_framerate = client_config.framerate;
+    active_vbv_percentage_increase = config.vbv_percentage_increase;
 
     if (nvenc_failed(nvenc->nvEncInitializeEncoder(encoder, &init_params))) {
       BOOST_LOG(error) << "NvEnc: NvEncInitializeEncoder() failed: " << last_nvenc_error_string;
@@ -674,5 +679,36 @@ namespace nvenc {
     }
 
     return version;
+  }
+
+  bool nvenc_base::reconfigure_bitrate(uint32_t bitrate_kbps) {
+    if (!encoder || !nvenc || !nvenc->nvEncReconfigureEncoder) {
+      return false;
+    }
+
+    NV_ENC_RECONFIGURE_PARAMS reconfig_params {};
+    reconfig_params.version = min_struct_version(NV_ENC_RECONFIGURE_PARAMS_VER);
+    reconfig_params.reInitEncodeParams = active_init_params;
+    reconfig_params.resetEncoder = 0;
+    reconfig_params.forceIDR = 0;
+
+    active_enc_config.rcParams.averageBitRate = bitrate_kbps * 1000;
+    active_enc_config.rcParams.maxBitRate = bitrate_kbps * 1000;
+    if (supports_custom_vbv_buf_size && active_framerate > 0) {
+      active_enc_config.rcParams.vbvBufferSize = (bitrate_kbps * 1000) / active_framerate;
+      if (active_vbv_percentage_increase > 0) {
+        active_enc_config.rcParams.vbvBufferSize += active_enc_config.rcParams.vbvBufferSize * active_vbv_percentage_increase / 100;
+      }
+    }
+    reconfig_params.reInitEncodeParams.encodeConfig = &active_enc_config;
+
+    auto status = nvenc->nvEncReconfigureEncoder(encoder, &reconfig_params);
+    if (nvenc_failed(status)) {
+      BOOST_LOG(warning) << "NvEnc: nvEncReconfigureEncoder failed: " << last_nvenc_error_string;
+      return false;
+    }
+
+    BOOST_LOG(debug) << "NvEnc: Dynamically reconfigured bitrate to " << bitrate_kbps << " kbps";
+    return true;
   }
 }  // namespace nvenc

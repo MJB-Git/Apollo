@@ -1,6 +1,6 @@
 /**
  * @file src/abr_controller.h
- * @brief Server-Side Network Adaptive Bitrate (ABR) Controller with Cubic Inflection and Delay-Gradient Pre-Braking.
+ * @brief Server-Side Network Adaptive Bitrate (ABR) Controller with Cubic Inflection, Delay-Gradient Pre-Braking, and Reconfigure Hysteresis.
  */
 #pragma once
 
@@ -98,19 +98,20 @@ namespace abr {
 
       if (_is_wan) {
         _ceiling_kbps = std::min(client_requested_bitrate_kbps, _config.wan_max_kbps);
-        // Start WAN slightly conservative to establish stable baseline immediately
         _current_target_kbps = std::min(_ceiling_kbps, 32000u);
       } else {
         _ceiling_kbps = client_requested_bitrate_kbps;
         _current_target_kbps = _ceiling_kbps;
       }
 
+      _last_applied_bitrate_kbps = _current_target_kbps;
       _w_max_kbps = (float)_ceiling_kbps;
       _state = state_e::STEADY;
 
       auto now = std::chrono::steady_clock::now();
       _last_loss_time = now - 60s;
       _last_brake_time = now - 60s;
+      _last_reconfigure_time = now;
       _last_tick_time = now;
       _last_log_time = now;
       _consecutive_loss_free_seconds = 0.0f;
@@ -156,12 +157,14 @@ namespace abr {
         _consecutive_loss_free_seconds = 0.0f;
         _last_loss_pct = (interval_ms > 0) ? ((float)loss_count * 100.0f / (interval_ms * 0.06f + 1.0f)) : 5.0f;
 
-        if (new_target != _current_target_kbps) {
-          _current_target_kbps = new_target;
-          out_new_bitrate = new_target;
-          log_telemetry(now, true);
-          return true;
-        }
+        _current_target_kbps = new_target;
+
+        // Immediate down-cut on packet loss
+        _last_applied_bitrate_kbps = _current_target_kbps;
+        _last_reconfigure_time = now;
+        out_new_bitrate = _current_target_kbps;
+        log_telemetry(now, true);
+        return true;
       } else {
         _last_loss_pct = 0.0f;
       }
@@ -203,9 +206,9 @@ namespace abr {
       _last_rtt = current_rtt;
       _last_rtt_var = rtt_var;
 
-      bool bitrate_changed = false;
       auto ms_since_loss = std::chrono::duration_cast<std::chrono::milliseconds>(now - _last_loss_time).count();
       auto ms_since_brake = std::chrono::duration_cast<std::chrono::milliseconds>(now - _last_brake_time).count();
+      auto ms_since_reconfig = std::chrono::duration_cast<std::chrono::milliseconds>(now - _last_reconfigure_time).count();
 
       // Pre-Drop Delay Braking: Queuing delay rising above threshold or jitter spike
       if (_state != state_e::CONGESTED && ms_since_brake > 600 && ms_since_loss > 1500) {
@@ -216,16 +219,12 @@ namespace abr {
 
           _state = state_e::PRE_CONGESTION_BRAKE;
           _last_brake_time = now;
-
-          if (new_target != _current_target_kbps) {
-            _current_target_kbps = new_target;
-            bitrate_changed = true;
-          }
+          _current_target_kbps = new_target;
         }
       }
 
       // Cubic Inflection Recovery & Ramp
-      if (!bitrate_changed && ms_since_loss > 2000 && ms_since_brake > 600) {
+      if (_state != state_e::PRE_CONGESTION_BRAKE && ms_since_loss > 2000 && ms_since_brake > 600) {
         _consecutive_loss_free_seconds += dt;
 
         // Exponential decay on W_max towards ceiling if link remains clear > 12s
@@ -257,18 +256,34 @@ namespace abr {
           _state = state_e::PROBING;
         }
 
-        if (new_target != _current_target_kbps) {
-          _current_target_kbps = new_target;
-          bitrate_changed = true;
-        }
+        _current_target_kbps = new_target;
       }
 
-      log_telemetry(now, bitrate_changed);
+      // Hysteresis & Rate-Limiting Filter on nvEncReconfigureEncoder:
+      // Prevents rapid driver stalls that cap frame rates to 20-30 FPS!
+      bool should_reconfigure = false;
+      if (_last_applied_bitrate_kbps > 0) {
+        float ratio = (float)_current_target_kbps / (float)_last_applied_bitrate_kbps;
+        if (ratio <= 0.92f && ms_since_reconfig >= 500) {
+          // Stepping DOWN: At least 8% change and 500ms since last reconfigure
+          should_reconfigure = true;
+        } else if (ratio >= 1.10f && ms_since_reconfig >= 2000) {
+          // Stepping UP: At least 10% change and 2000ms since last reconfigure
+          should_reconfigure = true;
+        }
+      } else {
+        should_reconfigure = true;
+      }
 
-      if (bitrate_changed) {
+      log_telemetry(now, should_reconfigure);
+
+      if (should_reconfigure) {
+        _last_applied_bitrate_kbps = _current_target_kbps;
+        _last_reconfigure_time = now;
         out_new_bitrate = _current_target_kbps;
         return true;
       }
+
       return false;
     }
 
@@ -280,6 +295,7 @@ namespace abr {
                         << " | Target: " << (_current_target_kbps / 1000.0)
                         << " Mbps (Ceiling: " << (_ceiling_kbps / 1000.0)
                         << " Mbps, W_max: " << (_w_max_kbps / 1000.0)
+                        << " Mbps, Applied: " << (_last_applied_bitrate_kbps / 1000.0)
                         << " Mbps) | RTT: " << _last_rtt
                         << "ms (+" << _last_rtt_var << "ms jitter: " << _last_queue_delay
                         << "ms) | Loss: " << _last_loss_pct << "%";
@@ -292,11 +308,13 @@ namespace abr {
     bool _is_wan = false;
     uint32_t _ceiling_kbps = 42000;
     uint32_t _current_target_kbps = 42000;
+    uint32_t _last_applied_bitrate_kbps = 42000;
     float _w_max_kbps = 42000.0f;
     state_e _state = state_e::STEADY;
 
     std::chrono::steady_clock::time_point _last_loss_time;
     std::chrono::steady_clock::time_point _last_brake_time;
+    std::chrono::steady_clock::time_point _last_reconfigure_time;
     std::chrono::steady_clock::time_point _last_tick_time;
     std::chrono::steady_clock::time_point _last_log_time;
 

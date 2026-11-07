@@ -458,7 +458,7 @@ namespace config {
     true,  // nv_opengl_vulkan_on_dxgi
     true,  // nv_sunshine_high_power_mode
     {},  // nv_legacy
-    { true, 42000, 3000 },  // abr
+    { true, 42000, 6000 },  // abr
 
     {
       qsv::medium,  // preset

@@ -89,11 +89,11 @@ namespace abr {
       bool enabled = true;
       uint32_t wan_max_kbps = 42000;          // Capped for 50 Mbps NBN FTTP uplink (~42 Mbps payload)
       uint32_t min_kbps = 6000;               // Floor bitrate (Raised to 6 Mbps for high-motion 120Hz gaming)
-      uint32_t queue_delay_threshold_ms = 20; // Pre-drop trigger threshold (20ms queue growth)
-      uint32_t jitter_threshold_ms = 18;      // Jitter trigger threshold (18ms)
+      uint32_t queue_delay_threshold_ms = 45; // Rail 5G Tuned: 45ms queue growth absorbs radio scheduling jitter
+      uint32_t jitter_threshold_ms = 45;      // Rail 5G Tuned: 45ms jitter threshold
       float pre_congestion_trim = 0.90f;      // -10% gentle pre-brake
       float loss_brake = 0.70f;               // -30% multiplicative cut on packet loss
-      float fast_recovery_ramp = 0.15f;       // Fast ramp (+15%/s) below 0.85 * W_max
+      float fast_recovery_ramp = 0.12f;       // Smooth ramp (+12%/s) below 0.85 * W_max
       float cruise_ramp = 0.02f;              // Plateau near W_max
       float probe_ramp = 0.05f;               // +5%/s exploration
       float idr_vbv_clamp_ratio = 1.30f;      // VBV single-frame clamp multiplier for IDR recovery
@@ -243,7 +243,7 @@ namespace abr {
       // HARQ Jitter Guard: require sustained gradient over multiple ticks
       if (queue_delay >= _config.queue_delay_threshold_ms && grad > 0.5f) {
         _rise_ticks++;
-      } else if (queue_delay < 15) {
+      } else if (queue_delay < 25) {
         _rise_ticks = 0;
       }
 
@@ -253,7 +253,7 @@ namespace abr {
 
       bool is_handover = (current_rtt - min_rtt > 150 && grad > 25.0f) || (min_rtt > 0 && current_rtt > 4 * min_rtt);
       bool is_congested_gradient = (_rise_ticks >= 3);
-      bool is_link_clear = (queue_delay < 15);
+      bool is_link_clear = (queue_delay < 25);
 
       auto ms_since_loss = std::chrono::duration_cast<std::chrono::milliseconds>(now - _last_loss_time).count();
       auto ms_since_brake = std::chrono::duration_cast<std::chrono::milliseconds>(now - _last_brake_time).count();
@@ -331,8 +331,9 @@ namespace abr {
       }
 
       // Cubic / Multiplicative Recovery Ramp (Active in RECOVERY, STEADY, PROBING)
+      // Minimum 1200ms stabilization hold after pre-brake to eliminate rapid oscillation cycles
       if (_state != state_e::PRE_CONGESTION_BRAKE && _state != state_e::CONGESTED && _state != state_e::HOLD &&
-          ms_since_loss > 2000 && ms_since_brake > 500) {
+          ms_since_loss > 2000 && ms_since_brake > 1200) {
         _consecutive_loss_free_seconds += dt;
 
         // Exponential decay on W_max towards ceiling if link remains clear > 8s

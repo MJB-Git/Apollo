@@ -405,6 +405,7 @@ namespace video {
 
     void request_idr_frame() override {
       force_idr = true;
+      last_forced_idr_time = std::chrono::steady_clock::now();
     }
 
     void request_normal_frame() override {
@@ -417,7 +418,13 @@ namespace video {
       }
 
       if (!device->nvenc->invalidate_ref_frames(first_frame, last_frame)) {
-        force_idr = true;
+        auto now = std::chrono::steady_clock::now();
+        if (now - last_forced_idr_time >= 1000ms) {
+          last_forced_idr_time = now;
+          force_idr = true;
+        } else {
+          BOOST_LOG(debug) << "NvEnc: Suppressing duplicate fallback IDR within 1000ms cooldown";
+        }
       }
     }
 
@@ -440,6 +447,7 @@ namespace video {
   private:
     std::unique_ptr<platf::nvenc_encode_device_t> device;
     bool force_idr = false;
+    std::chrono::steady_clock::time_point last_forced_idr_time {};
   };
 
   struct sync_session_ctx_t {

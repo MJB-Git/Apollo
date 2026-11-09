@@ -311,7 +311,7 @@ namespace nvenc {
           } else {
             format_config.entropyCodingMode = NV_ENC_H264_ENTROPY_CODING_MODE_CABAC;
           }
-          set_ref_frames(format_config.maxNumRefFrames, format_config.numRefL0, 5);
+          set_ref_frames(format_config.maxNumRefFrames, format_config.numRefL0, 16);
           set_minqp_if_enabled(config.min_qp_h264);
           fill_h264_hevc_vui(format_config.h264VUIParameters);
           break;
@@ -325,7 +325,7 @@ namespace nvenc {
           if (buffer_is_10bit()) {
             format_config.pixelBitDepthMinus8 = 2;
           }
-          set_ref_frames(format_config.maxNumRefFramesInDPB, format_config.numRefL0, 5);
+          set_ref_frames(format_config.maxNumRefFramesInDPB, format_config.numRefL0, 16);
           set_minqp_if_enabled(config.min_qp_hevc);
           fill_h264_hevc_vui(format_config.hevcVUIParameters);
           if (client_config.enableIntraRefresh == 1) {

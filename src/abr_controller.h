@@ -89,8 +89,9 @@ namespace abr {
       bool enabled = true;
       uint32_t wan_max_kbps = 42000;          // Capped for 50 Mbps NBN FTTP uplink (~42 Mbps payload)
       uint32_t min_kbps = 6000;               // Floor bitrate (Raised to 6 Mbps for high-motion 120Hz gaming)
-      uint32_t queue_delay_threshold_ms = 45; // Rail 5G Tuned: 45ms queue growth absorbs radio scheduling jitter
-      uint32_t jitter_threshold_ms = 45;      // Rail 5G Tuned: 45ms jitter threshold
+      uint32_t target_rtt_ms = 50;            // Empirical Hard Latency Target: <= 50ms RTT
+      uint32_t queue_delay_threshold_ms = 20; // Empirical 50ms Target: 20ms queue delay triggers brake
+      uint32_t jitter_threshold_ms = 25;      // Jitter threshold
       float pre_congestion_trim = 0.90f;      // -10% gentle pre-brake
       float loss_brake = 0.70f;               // -30% multiplicative cut on packet loss
       float fast_recovery_ramp = 0.12f;       // Smooth ramp (+12%/s) below 0.85 * W_max
@@ -227,7 +228,8 @@ namespace abr {
       // Base-path shift detection: if RTT is elevated for >5s without rising queue, re-seed base RTT
       if (min_rtt > 0 && current_rtt > (uint32_t)(1.35f * min_rtt)) {
         auto ms_elevated = std::chrono::duration_cast<std::chrono::milliseconds>(now - _elevated_since_time).count();
-        if (ms_elevated > 8000 && _state != state_e::HOLD && current_rtt < 120) {
+        // CRITICAL: Never allow min_rtt to re-seed above 40ms, ensuring >50ms is always treated as bloat!
+        if (ms_elevated > 8000 && _state != state_e::HOLD && current_rtt <= 40) {
           _min_rtt_history.clear();
           _min_rtt_history.emplace_back(now, current_rtt);
           min_rtt = current_rtt;
@@ -240,12 +242,15 @@ namespace abr {
       uint32_t queue_delay = (current_rtt > min_rtt) ? (current_rtt - min_rtt) : 0;
       float grad = _srtt - _prev_srtt;
 
+      // Empirical 50ms Latency Target: Immediate & Proportional Braking
+      bool is_latency_violating = (current_rtt > 50 || queue_delay > 20);
+
       // HARQ Jitter Guard: require sustained gradient over multiple ticks OR sustained elevated queue delay (plateau)
       if (queue_delay >= _config.queue_delay_threshold_ms) {
-        if (grad > 0.5f || queue_delay >= 60) {
+        if (grad > 0.5f || queue_delay >= 30) {
           _rise_ticks++;
         }
-      } else if (queue_delay < 25) {
+      } else if (queue_delay < 15) {
         _rise_ticks = 0;
       }
 
@@ -254,8 +259,20 @@ namespace abr {
       _last_rtt_var = rtt_var;
 
       bool is_handover = (current_rtt - min_rtt > 150 && grad > 25.0f) || (min_rtt > 0 && current_rtt > 4 * min_rtt);
-      bool is_congested_gradient = (_rise_ticks >= 3) || (queue_delay >= 75) || (current_rtt > 100);
-      bool is_link_clear = (queue_delay < 25 && current_rtt < 70);
+      bool is_congested_gradient = is_latency_violating || (_rise_ticks >= 2);
+
+      // Link Clear: Strict empirical safety margin (RTT <= 42ms, queue <= 15ms, jitter <= 12ms, grad <= 0.5f)
+      bool is_link_clear = (current_rtt <= 42 && queue_delay <= 15 && rtt_var <= 12 && grad <= 0.5f);
+
+      // Proportional step-down calculation based on latency overshoot
+      float dynamic_trim = _config.pre_congestion_trim; // default 0.90f (-10%)
+      if (current_rtt > 100 || queue_delay > 60) {
+        dynamic_trim = 0.75f; // -25% aggressive drain for severe bloat
+      } else if (current_rtt > 70 || queue_delay > 35) {
+        dynamic_trim = 0.82f; // -18% moderate drain
+      } else if (current_rtt > 50 || queue_delay > 20) {
+        dynamic_trim = 0.90f; // -10% gentle pre-brake
+      }
 
       auto ms_since_loss = std::chrono::duration_cast<std::chrono::milliseconds>(now - _last_loss_time).count();
       auto ms_since_brake = std::chrono::duration_cast<std::chrono::milliseconds>(now - _last_brake_time).count();
@@ -267,11 +284,11 @@ namespace abr {
         case state_e::PROBING: {
           if (is_handover) {
             enter_state(state_e::HOLD, now);
-          } else if (is_congested_gradient && ms_since_brake > 600 && ms_since_loss > 1500) {
-            // Start pre-congestion brake episode with floor guard
-            _w_max_kbps = std::max((float)_config.min_kbps, std::max(_w_max_kbps * 0.95f, (float)_current_target_kbps));
+          } else if (is_congested_gradient && ms_since_brake > 400 && ms_since_loss > 1000) {
+            // Start pre-congestion brake episode with empirical target floor guard
+            _w_max_kbps = std::max((float)_config.min_kbps, std::min(_w_max_kbps * 0.95f, (float)_current_target_kbps * 0.95f));
             _brake_floor_kbps = std::max(_config.min_kbps, (uint32_t)(0.50f * _w_max_kbps));
-            uint32_t new_target = std::max(_brake_floor_kbps, (uint32_t)(_current_target_kbps * _config.pre_congestion_trim));
+            uint32_t new_target = std::max(_brake_floor_kbps, (uint32_t)(_current_target_kbps * dynamic_trim));
 
             enter_state(state_e::PRE_CONGESTION_BRAKE, now);
             _last_brake_time = now;
@@ -299,8 +316,8 @@ namespace abr {
         }
 
         case state_e::PRE_CONGESTION_BRAKE: {
-          if (is_congested_gradient && ms_since_brake > 600) {
-            uint32_t new_target = std::max(_brake_floor_kbps, (uint32_t)(_current_target_kbps * _config.pre_congestion_trim));
+          if (is_congested_gradient && ms_since_brake > 400) {
+            uint32_t new_target = std::max(_brake_floor_kbps, (uint32_t)(_current_target_kbps * dynamic_trim));
             _current_target_kbps = new_target;
             _last_brake_time = now;
           }
@@ -321,9 +338,10 @@ namespace abr {
         case state_e::RECOVERY: {
           if (is_handover) {
             enter_state(state_e::HOLD, now);
-          } else if (is_congested_gradient && ms_since_brake > 600) {
+          } else if (is_congested_gradient && ms_since_brake > 400) {
+            _w_max_kbps = std::max((float)_config.min_kbps, std::min(_w_max_kbps * 0.95f, (float)_current_target_kbps * 0.95f));
             _brake_floor_kbps = std::max(_config.min_kbps, (uint32_t)(0.50f * _w_max_kbps));
-            _current_target_kbps = std::max(_brake_floor_kbps, (uint32_t)(_current_target_kbps * _config.pre_congestion_trim));
+            _current_target_kbps = std::max(_brake_floor_kbps, (uint32_t)(_current_target_kbps * dynamic_trim));
             _last_brake_time = now;
             _rise_ticks = 0;
             enter_state(state_e::PRE_CONGESTION_BRAKE, now);

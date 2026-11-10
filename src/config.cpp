@@ -529,7 +529,7 @@ namespace config {
   };
 
   stream_t stream {
-    10s,  // ping_timeout
+    20s,  // ping_timeout (extended for 5G rail transit)
 
     APPS_JSON_PATH,
 

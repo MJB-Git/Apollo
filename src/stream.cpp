@@ -534,7 +534,7 @@ namespace stream {
 
       // 5G Rail Hardening: Extend ENet peer timeout to 10s min / 30s max (default was 5s)
       // Prevents premature control-channel disconnect during cellular tower handovers and momentary signal fades
-      enet_peer_timeout(peer, 64, 10000, 30000);
+      enet_peer_timeout(peer, 64, 15000, 30000);
 
       // Use the local address from the control connection as the source address
       // for other communications to the client. This is necessary to ensure

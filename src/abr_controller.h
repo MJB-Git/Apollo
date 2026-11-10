@@ -227,7 +227,7 @@ namespace abr {
       // Base-path shift detection: if RTT is elevated for >5s without rising queue, re-seed base RTT
       if (min_rtt > 0 && current_rtt > (uint32_t)(1.35f * min_rtt)) {
         auto ms_elevated = std::chrono::duration_cast<std::chrono::milliseconds>(now - _elevated_since_time).count();
-        if (ms_elevated > 5000 && _state != state_e::HOLD) {
+        if (ms_elevated > 8000 && _state != state_e::HOLD && current_rtt < 120) {
           _min_rtt_history.clear();
           _min_rtt_history.emplace_back(now, current_rtt);
           min_rtt = current_rtt;
@@ -240,9 +240,11 @@ namespace abr {
       uint32_t queue_delay = (current_rtt > min_rtt) ? (current_rtt - min_rtt) : 0;
       float grad = _srtt - _prev_srtt;
 
-      // HARQ Jitter Guard: require sustained gradient over multiple ticks
-      if (queue_delay >= _config.queue_delay_threshold_ms && grad > 0.5f) {
-        _rise_ticks++;
+      // HARQ Jitter Guard: require sustained gradient over multiple ticks OR sustained elevated queue delay (plateau)
+      if (queue_delay >= _config.queue_delay_threshold_ms) {
+        if (grad > 0.5f || queue_delay >= 60) {
+          _rise_ticks++;
+        }
       } else if (queue_delay < 25) {
         _rise_ticks = 0;
       }
@@ -252,8 +254,8 @@ namespace abr {
       _last_rtt_var = rtt_var;
 
       bool is_handover = (current_rtt - min_rtt > 150 && grad > 25.0f) || (min_rtt > 0 && current_rtt > 4 * min_rtt);
-      bool is_congested_gradient = (_rise_ticks >= 3);
-      bool is_link_clear = (queue_delay < 25);
+      bool is_congested_gradient = (_rise_ticks >= 3) || (queue_delay >= 75) || (current_rtt > 100);
+      bool is_link_clear = (queue_delay < 25 && current_rtt < 70);
 
       auto ms_since_loss = std::chrono::duration_cast<std::chrono::milliseconds>(now - _last_loss_time).count();
       auto ms_since_brake = std::chrono::duration_cast<std::chrono::milliseconds>(now - _last_brake_time).count();
@@ -333,7 +335,7 @@ namespace abr {
       // Cubic / Multiplicative Recovery Ramp (Active in RECOVERY, STEADY, PROBING)
       // Minimum 1200ms stabilization hold after pre-brake to eliminate rapid oscillation cycles
       if (_state != state_e::PRE_CONGESTION_BRAKE && _state != state_e::CONGESTED && _state != state_e::HOLD &&
-          ms_since_loss > 2000 && ms_since_brake > 1200) {
+          ms_since_loss > 2000 && ms_since_brake > 1200 && is_link_clear) {
         _consecutive_loss_free_seconds += dt;
 
         // Exponential decay on W_max towards ceiling if link remains clear > 8s
